@@ -1,4 +1,4 @@
-"""
+﻿"""
 MediCore AI — FastAPI Backend
 Stateless: upload a CSV, get back JSON (KPIs, findings, schema) or a PDF/PPTX report.
 No DB required. Designed to sit behind a React frontend and, later, read from
@@ -9,8 +9,15 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import io
+import os
+import requests
 
 from app import core, findings as findings_module, reports
+
+# xAI (Grok) TTS -- key lives only here, server-side. Never send it to the frontend.
+XAI_API_KEY = os.environ.get("XAI_API_KEY")
+XAI_TTS_URL = "https://api.x.ai/v1/tts"
+ALLOWED_VOICES = {"eve", "ara", "rex", "sal", "leo"}
 
 app = FastAPI(title="MediCore AI Backend", version="1.0.0")
 
@@ -120,3 +127,41 @@ async def report_pptx(file: UploadFile = File(...)):
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         headers={"Content-Disposition": "attachment; filename=medicore_ai_presentation.pptx"},
     )
+
+
+@app.post("/api/tts")
+async def text_to_speech(text: str = Form(...), voice_id: str = Form("eve")):
+    """
+    Proxies to xAI's Grok TTS API. Frontend sends plain text (a finding's explanation),
+    gets back MP3 bytes. The XAI_API_KEY never leaves this server.
+    """
+    if not XAI_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="XAI_API_KEY not set on the server. Add it in Render -> Environment.",
+        )
+    if voice_id not in ALLOWED_VOICES:
+        voice_id = "eve"
+    if len(text) > 15000:
+        text = text[:15000]
+
+    try:
+        resp = requests.post(
+            XAI_TTS_URL,
+            headers={
+                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"text": text, "voice_id": voice_id, "language": "en"},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach xAI TTS: {e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"xAI TTS error: {resp.text[:300]}",
+        )
+
+    return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
