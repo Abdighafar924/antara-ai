@@ -1,4 +1,4 @@
-"""
+﻿"""
 MediCore AI — Report Generators
 PDF (ReportLab) and PPTX (python-pptx). No Streamlit dependency — pure functions
 that take the cleaned dataframe + computed metrics and return bytes.
@@ -147,7 +147,8 @@ def generate_pdf_report(df, cm, quality, hs, maturity, hospital_name="", report_
         recs.append(f"2. SATISFACTION ({df[sat_col].mean():.2f}/5): Hourly rounding, communication training.")
     if cost_col in df.columns and df[cost_col].mean() > 9000:
         recs.append(f"3. COST (KES {df[cost_col].mean():,.0f} avg): Review protocols for LOS optimisation.")
-    recs.append(f"4. DATA QUALITY ({quality['quality_score']:.0f}/100): Address outstanding issues.")
+    if quality['quality_score'] < 85:
+        recs.append(f"4. DATA QUALITY ({quality['quality_score']:.0f}/100): Address outstanding issues.")
     for r in recs:
         story.append(Paragraph(r, body))
         story.append(Spacer(1,6))
