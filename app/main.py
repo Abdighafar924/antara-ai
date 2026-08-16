@@ -14,12 +14,16 @@ import requests
 
 from app import core, findings as findings_module, reports
 
-# Groq TTS (PlayAI models) -- key lives only here, server-side. Never send it to the frontend.
+# Groq TTS (Orpheus models) -- key lives only here, server-side. Never send it to the frontend.
 # NOTE: "Groq" (console.groq.com, fast inference) is a different company from "Grok" (xAI).
+# playai-tts was deprecated 12/31/25 -- replaced by canopylabs/orpheus-v1-english.
+# Orpheus voices: autumn, diana, hannah (female) / austin, daniel, troy (male).
+# IMPORTANT: Orpheus input is capped at 200 characters -- longer text is rejected.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
-GROQ_TTS_MODEL = "playai-tts"
-DEFAULT_VOICE = "Fritz-PlayAI"
+GROQ_TTS_MODEL = "canopylabs/orpheus-v1-english"
+DEFAULT_VOICE = "autumn"
+ORPHEUS_CHAR_LIMIT = 200
 
 app = FastAPI(title="MediCore AI Backend", version="1.0.0")
 
@@ -131,12 +135,30 @@ async def report_pptx(file: UploadFile = File(...)):
     )
 
 
+def _truncate_for_orpheus(text: str, limit: int = ORPHEUS_CHAR_LIMIT) -> str:
+    """Orpheus rejects input over 200 chars. Cut at the last sentence boundary
+    (period/!/?) before the limit; fall back to the last space; never cut mid-word
+    unless the text has no spaces at all."""
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    for punct in (". ", "! ", "? "):
+        idx = window.rfind(punct)
+        if idx != -1:
+            return window[: idx + 1].strip()
+    idx = window.rfind(" ")
+    if idx != -1:
+        return window[:idx].strip()
+    return window.strip()
+
+
 @app.post("/api/tts")
 async def text_to_speech(text: str = Form(...), voice_id: str = Form(DEFAULT_VOICE)):
     """
-    Proxies to Groq's PlayAI TTS API (api.groq.com/openai/v1/audio/speech).
-    Frontend sends plain text (a finding's explanation), gets back MP3 bytes.
-    GROQ_API_KEY never leaves this server.
+    Proxies to Groq's Orpheus TTS API (api.groq.com/openai/v1/audio/speech).
+    Frontend sends plain text (a finding's explanation), gets back WAV bytes.
+    GROQ_API_KEY never leaves this server. Text over 200 chars is truncated at a
+    sentence boundary -- Orpheus hard-rejects anything longer.
     """
     if not GROQ_API_KEY:
         raise HTTPException(
@@ -145,8 +167,7 @@ async def text_to_speech(text: str = Form(...), voice_id: str = Form(DEFAULT_VOI
         )
     if not voice_id:
         voice_id = DEFAULT_VOICE
-    if len(text) > 10000:
-        text = text[:10000]
+    text = _truncate_for_orpheus(text)
 
     try:
         resp = requests.post(
@@ -159,7 +180,7 @@ async def text_to_speech(text: str = Form(...), voice_id: str = Form(DEFAULT_VOI
                 "model": GROQ_TTS_MODEL,
                 "input": text,
                 "voice": voice_id,
-                "response_format": "mp3",
+                "response_format": "wav",
             },
             timeout=30,
         )
@@ -172,4 +193,4 @@ async def text_to_speech(text: str = Form(...), voice_id: str = Form(DEFAULT_VOI
             detail=f"Groq TTS error: {resp.text[:300]}",
         )
 
-    return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
+    return StreamingResponse(io.BytesIO(resp.content), media_type="audio/wav")
