@@ -1,4 +1,4 @@
-"""
+﻿"""
 MediCore AI — Core Analytics Engine
 Framework-agnostic port of the original Streamlit app's data pipeline.
 No st.* calls. Pure pandas/numpy/sklearn functions that FastAPI (or anything else) can call.
@@ -370,6 +370,16 @@ def _engineer(df, cm):
     if cd4_col and cd4_col in df.columns:
         df["CD4_Category"] = pd.cut(df[cd4_col], bins=[0,200,350,500,10000],
                                      labels=["Severe (<200)","Moderate (200–350)","Mild (350–500)","Healthy (>500)"])
+
+    stage_col = cm.get("cancer_stage")
+    if stage_col and stage_col in df.columns:
+        stage_map = {"i":1,"ii":2,"iii":3,"iv":4,"1":1,"2":2,"3":3,"4":4,
+                     "stage i":1,"stage ii":2,"stage iii":3,"stage iv":4}
+        def parse_stage(v):
+            if pd.isna(v): return np.nan
+            return stage_map.get(str(v).lower().strip(), np.nan)
+        if df[stage_col].dtype == object:
+            df["Cancer_Stage_Num"] = df[stage_col].map(parse_stage)
 
     return df
 

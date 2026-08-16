@@ -14,10 +14,12 @@ import requests
 
 from app import core, findings as findings_module, reports
 
-# xAI (Grok) TTS -- key lives only here, server-side. Never send it to the frontend.
-XAI_API_KEY = os.environ.get("XAI_API_KEY")
-XAI_TTS_URL = "https://api.x.ai/v1/tts"
-ALLOWED_VOICES = {"eve", "ara", "rex", "sal", "leo"}
+# Groq TTS (PlayAI models) -- key lives only here, server-side. Never send it to the frontend.
+# NOTE: "Groq" (console.groq.com, fast inference) is a different company from "Grok" (xAI).
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
+GROQ_TTS_MODEL = "playai-tts"
+DEFAULT_VOICE = "Fritz-PlayAI"
 
 app = FastAPI(title="MediCore AI Backend", version="1.0.0")
 
@@ -72,7 +74,7 @@ async def analyze(file: UploadFile = File(...)):
 
 
 @app.post("/api/findings")
-async def get_findings(file: UploadFile = File(...), top_n: int = 8):
+async def get_findings(file: UploadFile = File(...), top_n: int = 20):
     """
     Returns the findings[] contract for the step-confirm frontend:
     ordered list of {id, severity, kpi, chart, explanation}.
@@ -130,38 +132,44 @@ async def report_pptx(file: UploadFile = File(...)):
 
 
 @app.post("/api/tts")
-async def text_to_speech(text: str = Form(...), voice_id: str = Form("eve")):
+async def text_to_speech(text: str = Form(...), voice_id: str = Form(DEFAULT_VOICE)):
     """
-    Proxies to xAI's Grok TTS API. Frontend sends plain text (a finding's explanation),
-    gets back MP3 bytes. The XAI_API_KEY never leaves this server.
+    Proxies to Groq's PlayAI TTS API (api.groq.com/openai/v1/audio/speech).
+    Frontend sends plain text (a finding's explanation), gets back MP3 bytes.
+    GROQ_API_KEY never leaves this server.
     """
-    if not XAI_API_KEY:
+    if not GROQ_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="XAI_API_KEY not set on the server. Add it in Render -> Environment.",
+            detail="GROQ_API_KEY not set on the server. Add it in Render -> Environment.",
         )
-    if voice_id not in ALLOWED_VOICES:
-        voice_id = "eve"
-    if len(text) > 15000:
-        text = text[:15000]
+    if not voice_id:
+        voice_id = DEFAULT_VOICE
+    if len(text) > 10000:
+        text = text[:10000]
 
     try:
         resp = requests.post(
-            XAI_TTS_URL,
+            GROQ_TTS_URL,
             headers={
-                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Authorization": f"Bearer {GROQ_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={"text": text, "voice_id": voice_id, "language": "en"},
+            json={
+                "model": GROQ_TTS_MODEL,
+                "input": text,
+                "voice": voice_id,
+                "response_format": "mp3",
+            },
             timeout=30,
         )
     except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach xAI TTS: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not reach Groq TTS: {e}")
 
     if resp.status_code != 200:
         raise HTTPException(
             status_code=resp.status_code,
-            detail=f"xAI TTS error: {resp.text[:300]}",
+            detail=f"Groq TTS error: {resp.text[:300]}",
         )
 
     return StreamingResponse(io.BytesIO(resp.content), media_type="audio/mpeg")
