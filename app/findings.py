@@ -139,13 +139,16 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
 
     if "Admission_Hour" in df.columns:
         hour_counts = df["Admission_Hour"].value_counts().sort_index()
-        peak_hour = int(hour_counts.idxmax())
-        findings.append({
-            "id": "admission_hour_peak", "severity": "info",
-            "kpi": {"label": "Peak Admission Hour", "value": f"{peak_hour}:00", "benchmark": "--"},
-            "chart": _chart("bar", [f"{h}:00" for h in hour_counts.index], hour_counts.values, y_label="Admissions"),
-            "explanation": f"Most admissions occur around {peak_hour}:00 -- useful for aligning shift handover and triage capacity.",
-        })
+        # Guard: if every admission falls in one hour, the source data almost certainly
+        # stores dates without real time-of-day (defaults to midnight) -- not a real pattern.
+        if len(hour_counts) > 1 and hour_counts.max() / hour_counts.sum() < 0.9:
+            peak_hour = int(hour_counts.idxmax())
+            findings.append({
+                "id": "admission_hour_peak", "severity": "info",
+                "kpi": {"label": "Peak Admission Hour", "value": f"{peak_hour}:00", "benchmark": "--"},
+                "chart": _chart("bar", [f"{h}:00" for h in hour_counts.index], hour_counts.values, y_label="Admissions"),
+                "explanation": f"Most admissions occur around {peak_hour}:00 -- useful for aligning shift handover and triage capacity.",
+            })
 
     # ==================== DEMOGRAPHICS ====================
 
@@ -543,12 +546,20 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
     if "Admission_DayOfWeek" in df.columns and "Admission_Hour" in df.columns:
         dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
         dow = df["Admission_DayOfWeek"].value_counts().reindex(dow_order).fillna(0)
-        peak_hour = int(df["Admission_Hour"].value_counts().idxmax())
+        hour_counts = df["Admission_Hour"].value_counts()
+        hour_has_variance = len(hour_counts) > 1 and hour_counts.max() / hour_counts.sum() < 0.9
+        if hour_has_variance:
+            peak_hour = int(hour_counts.idxmax())
+            value_str = f"{dow.idxmax()} @ {peak_hour}:00"
+            explanation = f"Peak admissions cluster around {dow.idxmax()} at {peak_hour}:00 -- review staffing rotas and consider staggering discharges ahead of this window."
+        else:
+            value_str = dow.idxmax()
+            explanation = f"Peak admissions cluster on {dow.idxmax()} -- review staffing rotas for that day. (Admission timestamps in this dataset don't carry reliable time-of-day detail, so hour-level alignment isn't shown.)"
         findings.append({
             "id": "rec_staffing_alignment", "severity": "info",
-            "kpi": {"label": "Staffing Alignment", "value": f"{dow.idxmax()} @ {peak_hour}:00", "benchmark": "--"},
+            "kpi": {"label": "Staffing Alignment", "value": value_str, "benchmark": "--"},
             "chart": None,
-            "explanation": f"Peak admissions cluster around {dow.idxmax()} at {peak_hour}:00 -- review staffing rotas and consider staggering discharges ahead of this window.",
+            "explanation": explanation,
         })
 
     order = {"critical": 0, "warning": 1, "info": 2, "good": 3}
