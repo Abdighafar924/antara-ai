@@ -1,15 +1,14 @@
 ﻿"""
-Findings Builder — the "Antara Intelligence Brain" layer.
+Findings Builder -- the "Antara Intelligence Brain" layer.
 Takes MediCore's raw analytics output and turns it into an ordered findings[] list:
-each finding has a KPI, a chart, and an explanation — ready for the step-confirm UI
+each finding has a KPI, a chart, and an explanation -- ready for the step-confirm UI
 (KPI -> chart draws in -> explanation -> next finding).
 
-Deliberately broader than the original 6-finding version: every clinical domain panel,
-demographics, financial breakdowns (procedure/insurance/cost-per-day), and patient
-segmentation (KMeans, previously computed in core.py but never surfaced) each get a
-finding when the relevant columns exist. Findings are additive -- a dataset with only
-age/cost/condition still gets the core set; a rich dataset with HIV+diabetes+TB+cancer
-markers gets a finding for each domain actually present.
+v3: adds statistical inference (correlation/t-test/ANOVA), analytics maturity +
+improvement roadmap, additional recommendation-style findings (geriatric, staffing),
+and depth on existing clinical domains (viral load, ART-vs-CD4, glucose, recovery
+rate by condition, readmission by age group, admission hour, condition x gender).
+Each finding is still purely additive -- it only appears when its source columns exist.
 """
 
 import pandas as pd
@@ -17,10 +16,16 @@ import numpy as np
 
 from app import core
 
+try:
+    from scipy import stats as scipy_stats
+    SCIPY_OK = True
+except ImportError:
+    SCIPY_OK = False
+
 
 def _chart(chart_type, labels, values, x_label="", y_label=""):
     return {
-        "type": chart_type,             # "bar" | "line" | "pie"
+        "type": chart_type,
         "labels": [str(l) for l in labels],
         "values": [round(float(v), 2) for v in values],
         "x_label": x_label,
@@ -35,7 +40,7 @@ def _top_by(df, group_col, value_col, n=6, ascending=False):
     return s if len(s) else None
 
 
-def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
+def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
     findings = []
     cond_col = cm.get("condition")
     cost_col = cm.get("cost")
@@ -48,12 +53,13 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
     ward_col = cm.get("ward")
     outcome_col = cm.get("outcome")
 
-    # -- 1. Readmission --
+    # ==================== CORE (readmission, cost, satisfaction, LOS) ====================
+
     if "Readmission_Bin" in df.columns:
         rr = hs["rr"]
         severity = "critical" if rr > 20 else "warning" if rr > 15 else "good"
-        chart = None
         by_cond = None
+        chart = None
         if cond_col and cond_col in df.columns:
             by_cond = (df.groupby(cond_col)["Readmission_Bin"].mean() * 100).sort_values(ascending=False).head(6)
             chart = _chart("bar", by_cond.index, by_cond.values, y_label="Readmission Rate (%)")
@@ -67,7 +73,6 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             ),
         })
 
-    # -- 2. Cost --
     if cost_col and cost_col in df.columns:
         avg_cost = df[cost_col].mean()
         severity = "critical" if avg_cost > 12000 else "warning" if avg_cost > 9000 else "good"
@@ -83,7 +88,6 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             ),
         })
 
-    # -- 3. Satisfaction --
     if sat_col and sat_col in df.columns:
         sat = df[sat_col].mean()
         severity = "critical" if sat < 3.5 else "warning" if sat < 4.0 else "good"
@@ -99,7 +103,6 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             ),
         })
 
-    # -- 4. Length of stay --
     if los_col and los_col in df.columns:
         avg_los = df[los_col].mean()
         severity = "warning" if avg_los > 7 else "good"
@@ -112,35 +115,46 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             "explanation": f"Average length of stay is {avg_los:.1f} days against a 7-day benchmark.",
         })
 
-    # -- 5. Admission timing --
+    if "Long_Stay" in df.columns:
+        long_stay_pct = df["Long_Stay"].mean() * 100
+        findings.append({
+            "id": "long_stay_share", "severity": "warning" if long_stay_pct > 30 else "info",
+            "kpi": {"label": "Long-Stay Patients", "value": f"{long_stay_pct:.1f}%", "benchmark": "top quartile ~25%"},
+            "chart": None,
+            "explanation": f"{long_stay_pct:.1f}% of patients stayed longer than the 75th-percentile length of stay.",
+        })
+
+    # ==================== ADMISSIONS & TIMING ====================
+
     if "Admission_DayOfWeek" in df.columns:
         dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
         dow = df["Admission_DayOfWeek"].value_counts().reindex(dow_order).fillna(0)
         peak_day, peak_val = dow.idxmax(), dow.max()
         findings.append({
             "id": "admission_timing", "severity": "info",
-            "kpi": {"label": "Peak Admission Day", "value": peak_day, "benchmark": "-"},
+            "kpi": {"label": "Peak Admission Day", "value": peak_day, "benchmark": "--"},
             "chart": _chart("bar", dow.index, dow.values, y_label="Admissions"),
             "explanation": f"{peak_day} sees the highest admission volume ({peak_val:.0f} admissions). Consider staffing alignment.",
         })
 
-    # -- 6. Data quality --
-    dq = quality["quality_score"]
-    findings.append({
-        "id": "data_quality",
-        "severity": "critical" if dq < 70 else "warning" if dq < 85 else "good",
-        "kpi": {"label": "Data Quality Score", "value": f"{dq:.0f}/100", "benchmark": ">=85"},
-        "chart": None,
-        "explanation": quality["recommendations"][0] if quality["recommendations"] else "Data quality is within acceptable range.",
-    })
+    if "Admission_Hour" in df.columns:
+        hour_counts = df["Admission_Hour"].value_counts().sort_index()
+        peak_hour = int(hour_counts.idxmax())
+        findings.append({
+            "id": "admission_hour_peak", "severity": "info",
+            "kpi": {"label": "Peak Admission Hour", "value": f"{peak_hour}:00", "benchmark": "--"},
+            "chart": _chart("bar", [f"{h}:00" for h in hour_counts.index], hour_counts.values, y_label="Admissions"),
+            "explanation": f"Most admissions occur around {peak_hour}:00 -- useful for aligning shift handover and triage capacity.",
+        })
 
-    # -- 7. Demographics - age distribution --
+    # ==================== DEMOGRAPHICS ====================
+
     if age_col and age_col in df.columns and "Age_Group" in df.columns:
         elderly_pct = (df[age_col] >= 65).mean() * 100
         ag_counts = df["Age_Group"].value_counts().reindex(["<18","18-35","35-50","50-65","65+"]).fillna(0)
         findings.append({
             "id": "demographics_age", "severity": "warning" if elderly_pct > 30 else "info",
-            "kpi": {"label": "Patients 65+", "value": f"{elderly_pct:.1f}%", "benchmark": "-"},
+            "kpi": {"label": "Patients 65+", "value": f"{elderly_pct:.1f}%", "benchmark": "--"},
             "chart": _chart("bar", ag_counts.index, ag_counts.values, y_label="Patients"),
             "explanation": (
                 f"{elderly_pct:.1f}% of the cohort is 65 or older."
@@ -148,14 +162,13 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             ),
         })
 
-    # -- 8. Demographics - gender disparity in outcomes --
     if gender_col and gender_col in df.columns and cost_col and cost_col in df.columns:
         by_gender = df.groupby(gender_col)[cost_col].mean().sort_values(ascending=False)
         if len(by_gender) >= 2:
             gap_pct = (by_gender.iloc[0] - by_gender.iloc[-1]) / by_gender.iloc[-1] * 100
             findings.append({
                 "id": "gender_cost_gap", "severity": "warning" if gap_pct > 15 else "info",
-                "kpi": {"label": "Cost Gap by Gender", "value": f"{gap_pct:.1f}%", "benchmark": "-"},
+                "kpi": {"label": "Cost Gap by Gender", "value": f"{gap_pct:.1f}%", "benchmark": "--"},
                 "chart": _chart("bar", by_gender.index, by_gender.values, y_label="Avg Cost (KES)"),
                 "explanation": (
                     f"{by_gender.index[0]} patients average {gap_pct:.1f}% higher treatment cost than "
@@ -163,40 +176,92 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
                 ),
             })
 
-    # -- 9. Outcome distribution --
+    if gender_col and gender_col in df.columns and cond_col and cond_col in df.columns:
+        gc = df.groupby([gender_col, cond_col]).size().reset_index(name="count")
+        if not gc.empty:
+            top_combo = gc.loc[gc["count"].idxmax()]
+            findings.append({
+                "id": "condition_gender_prevalence", "severity": "info",
+                "kpi": {
+                    "label": "Most Common Condition x Gender",
+                    "value": f"{top_combo[cond_col]} ({top_combo[gender_col]})",
+                    "benchmark": "--",
+                },
+                "chart": None,
+                "explanation": f"{top_combo[cond_col]} in {top_combo[gender_col]} patients is the single most frequent condition/gender combination ({int(top_combo['count'])} cases).",
+            })
+
+    # ==================== OUTCOMES ====================
+
     if outcome_col and outcome_col in df.columns:
         odist = df[outcome_col].value_counts()
         top_outcome, top_pct = odist.index[0], odist.iloc[0] / len(df) * 100
         findings.append({
             "id": "outcomes", "severity": "info",
-            "kpi": {"label": "Most Common Outcome", "value": top_outcome, "benchmark": "-"},
+            "kpi": {"label": "Most Common Outcome", "value": top_outcome, "benchmark": "--"},
             "chart": _chart("bar", odist.index[:6], odist.values[:6], y_label="Patients"),
             "explanation": f"{top_pct:.1f}% of patients had outcome '{top_outcome}'.",
         })
 
-    # -- 10. Financial - cost by insurance/payer --
+    if outcome_col and outcome_col in df.columns and cond_col and cond_col in df.columns:
+        recovered_mask = df[outcome_col].astype(str).str.lower() == "recovered"
+        if recovered_mask.any():
+            recovery_by_cond = (
+                df.assign(_rec=recovered_mask.astype(int))
+                .groupby(cond_col)["_rec"].mean() * 100
+            ).sort_values()
+            if len(recovery_by_cond) >= 2:
+                worst_cond = recovery_by_cond.index[0]
+                findings.append({
+                    "id": "recovery_rate_by_condition", "severity": "warning" if recovery_by_cond.iloc[0] < 70 else "info",
+                    "kpi": {"label": "Lowest Recovery Rate", "value": f"{worst_cond} ({recovery_by_cond.iloc[0]:.1f}%)", "benchmark": "--"},
+                    "chart": _chart("bar", recovery_by_cond.index[:6], recovery_by_cond.values[:6], y_label="Recovery Rate (%)"),
+                    "explanation": f"{worst_cond} has the lowest recovery rate among recorded conditions at {recovery_by_cond.iloc[0]:.1f}%.",
+                })
+
+    if "Readmission_Bin" in df.columns and "Age_Group" in df.columns:
+        ra = (df.groupby("Age_Group", observed=True)["Readmission_Bin"].mean() * 100).round(1)
+        if len(ra) >= 2 and ra.max() > 0:
+            worst_age = ra.idxmax()
+            findings.append({
+                "id": "readmission_by_age_group", "severity": "warning" if ra.max() > 20 else "info",
+                "kpi": {"label": "Highest-Readmission Age Group", "value": f"{worst_age} ({ra.max():.1f}%)", "benchmark": "<=15%"},
+                "chart": _chart("bar", ra.index, ra.values, y_label="Readmission Rate (%)"),
+                "explanation": f"The {worst_age} age group has the highest readmission rate at {ra.max():.1f}%.",
+            })
+
+    # ==================== FINANCIAL ====================
+
     if ins_col and ins_col in df.columns and cost_col and cost_col in df.columns:
         by_ins = df.groupby(ins_col)[cost_col].mean().sort_values(ascending=False).head(6)
         if len(by_ins) >= 2:
             findings.append({
                 "id": "cost_by_insurance", "severity": "info",
-                "kpi": {"label": "Highest-Cost Payer", "value": by_ins.index[0], "benchmark": "-"},
+                "kpi": {"label": "Highest-Cost Payer", "value": by_ins.index[0], "benchmark": "--"},
                 "chart": _chart("bar", by_ins.index, by_ins.values, y_label="Avg Cost (KES)"),
                 "explanation": f"{by_ins.index[0]} patients have the highest average cost at KES {by_ins.iloc[0]:,.0f}.",
             })
 
-    # -- 11. Financial - cost by procedure --
     if proc_col and proc_col in df.columns and cost_col and cost_col in df.columns:
         by_proc = df.groupby(proc_col)[cost_col].mean().sort_values(ascending=False).head(6)
         if len(by_proc) >= 2:
             findings.append({
                 "id": "cost_by_procedure", "severity": "info",
-                "kpi": {"label": "Highest-Cost Procedure", "value": by_proc.index[0], "benchmark": "-"},
+                "kpi": {"label": "Highest-Cost Procedure", "value": by_proc.index[0], "benchmark": "--"},
                 "chart": _chart("bar", by_proc.index, by_proc.values, y_label="Avg Cost (KES)"),
                 "explanation": f"{by_proc.index[0]} averages KES {by_proc.iloc[0]:,.0f} per patient, the highest of any procedure recorded.",
             })
 
-    # -- 12. Financial - high-cost patient share --
+    if proc_col and proc_col in df.columns:
+        proc_counts = df[proc_col].value_counts().head(6)
+        if len(proc_counts) >= 2:
+            findings.append({
+                "id": "procedure_volume", "severity": "info",
+                "kpi": {"label": "Most Common Procedure", "value": proc_counts.index[0], "benchmark": "--"},
+                "chart": _chart("bar", proc_counts.index, proc_counts.values, y_label="Patients"),
+                "explanation": f"{proc_counts.index[0]} is the most frequently performed procedure ({proc_counts.iloc[0]:,} patients).",
+            })
+
     if "High_Cost" in df.columns and cost_col and cost_col in df.columns:
         high_cost_pct = df["High_Cost"].mean() * 100
         high_cost_avg = df.loc[df["High_Cost"], cost_col].mean()
@@ -207,18 +272,38 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             "explanation": f"{high_cost_pct:.1f}% of patients fall in the high-cost band, averaging KES {high_cost_avg:,.0f} each.",
         })
 
-    # -- 13. Ward / department volume --
+    if "Cost_Per_Day" in df.columns:
+        avg_cpd = df["Cost_Per_Day"].mean()
+        findings.append({
+            "id": "cost_per_day", "severity": "info",
+            "kpi": {"label": "Avg Cost per Inpatient Day", "value": f"KES {avg_cpd:,.0f}", "benchmark": "--"},
+            "chart": None,
+            "explanation": f"Average cost per inpatient day is KES {avg_cpd:,.0f} across the cohort.",
+        })
+
     if ward_col and ward_col in df.columns:
         by_ward = df[ward_col].value_counts().head(6)
         if len(by_ward) >= 2:
             findings.append({
                 "id": "ward_volume", "severity": "info",
-                "kpi": {"label": "Busiest Ward", "value": by_ward.index[0], "benchmark": "-"},
+                "kpi": {"label": "Busiest Ward", "value": by_ward.index[0], "benchmark": "--"},
                 "chart": _chart("bar", by_ward.index, by_ward.values, y_label="Patients"),
                 "explanation": f"{by_ward.index[0]} handles the highest patient volume ({by_ward.iloc[0]:,} patients).",
             })
 
-    # -- 14. Diabetes domain --
+    # ==================== DATA QUALITY ====================
+
+    dq = quality["quality_score"]
+    findings.append({
+        "id": "data_quality",
+        "severity": "critical" if dq < 70 else "warning" if dq < 85 else "good",
+        "kpi": {"label": "Data Quality Score", "value": f"{dq:.0f}/100", "benchmark": ">=85"},
+        "chart": None,
+        "explanation": quality["recommendations"][0] if quality["recommendations"] else "Data quality is within acceptable range.",
+    })
+
+    # ==================== CLINICAL DOMAINS ====================
+
     if "Diabetes" in clinical_domains:
         hba1c_col = cm.get("hba1c")
         if hba1c_col and hba1c_col in df.columns:
@@ -235,8 +320,16 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
                 "chart": chart,
                 "explanation": "Share of diabetic patients with HbA1c above 8% (poor glycaemic control).",
             })
+        glucose_col = cm.get("blood_glucose")
+        if glucose_col and glucose_col in df.columns:
+            avg_glucose = pd.to_numeric(df[glucose_col], errors="coerce").mean()
+            findings.append({
+                "id": "blood_glucose_avg", "severity": "warning" if avg_glucose > 130 else "good",
+                "kpi": {"label": "Avg Blood Glucose", "value": f"{avg_glucose:.0f}", "benchmark": "<=130"},
+                "chart": None,
+                "explanation": f"Average fasting blood glucose across diabetic patients is {avg_glucose:.0f}, {'above' if avg_glucose > 130 else 'within'} the typical target range.",
+            })
 
-    # -- 15. HIV / ART domain --
     if "HIV / ART" in clinical_domains:
         cd4_col = cm.get("cd4_count")
         if cd4_col and cd4_col in df.columns and "CD4_Category" in df.columns:
@@ -249,8 +342,27 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
                 "chart": _chart("bar", cd4_dist.index, cd4_dist.values, y_label="Patients"),
                 "explanation": "Share of HIV+ patients with CD4 count below 200 cells/uL.",
             })
+        vl_col = cm.get("viral_load")
+        if vl_col and vl_col in df.columns:
+            vl_numeric = pd.to_numeric(df[vl_col], errors="coerce")
+            suppressed_pct = (vl_numeric < 1000).mean() * 100
+            findings.append({
+                "id": "viral_load_suppression", "severity": "warning" if suppressed_pct < 80 else "good",
+                "kpi": {"label": "Viral Suppression Rate", "value": f"{suppressed_pct:.1f}%", "benchmark": ">=90%"},
+                "chart": None,
+                "explanation": f"{suppressed_pct:.1f}% of HIV+ patients have viral load under 1,000 copies/mL (virally suppressed).",
+            })
+        art_col = cm.get("art_status")
+        if art_col and art_col in df.columns and cd4_col and cd4_col in df.columns:
+            art_cd4 = pd.to_numeric(df[cd4_col], errors="coerce").groupby(df[art_col]).mean()
+            if len(art_cd4) >= 2:
+                findings.append({
+                    "id": "art_status_cd4", "severity": "info",
+                    "kpi": {"label": "CD4 by ART Status", "value": art_cd4.idxmax(), "benchmark": "--"},
+                    "chart": _chart("bar", art_cd4.index, art_cd4.values, y_label="Avg CD4 Count"),
+                    "explanation": f"Patients on ART status '{art_cd4.idxmax()}' have the highest average CD4 count, consistent with treatment effectiveness.",
+                })
 
-    # -- 16. Hypertension domain --
     if "Hypertension" in clinical_domains and "BP_Category" in df.columns:
         bp_dist = df["BP_Category"].value_counts()
         stage2_pct = (df["BP_Category"] == "Stage 2 HTN").mean() * 100
@@ -262,7 +374,6 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             "explanation": f"{stage2_pct:.1f}% of patients with BP readings fall in Stage 2 hypertension (>=140/90 mmHg).",
         })
 
-    # -- 17. Tuberculosis domain --
     if "Tuberculosis" in clinical_domains:
         dr_col = cm.get("drug_resistance")
         if dr_col and dr_col in df.columns:
@@ -276,14 +387,11 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
                 "explanation": f"{resistant_pct:.1f}% of TB patients show drug-resistant results (MDR/XDR-TB), which changes treatment protocol and isolation requirements.",
             })
 
-    # -- 18. Cancer / Oncology domain --
     if "Cancer / Oncology" in clinical_domains:
         stage_col = cm.get("cancer_stage")
         if stage_col and stage_col in df.columns:
             stage_dist = df[stage_col].value_counts().head(6)
-            late_stage_pct = None
-            if "Cancer_Stage_Num" in df.columns:
-                late_stage_pct = (df["Cancer_Stage_Num"] >= 3).mean() * 100
+            late_stage_pct = (df["Cancer_Stage_Num"] >= 3).mean() * 100 if "Cancer_Stage_Num" in df.columns else None
             findings.append({
                 "id": "cancer_stage",
                 "severity": "critical" if (late_stage_pct or 0) > 40 else "warning" if (late_stage_pct or 0) > 20 else "info",
@@ -292,7 +400,6 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
                 "explanation": "Share of cancer patients diagnosed at Stage III or IV, when treatment is more intensive and prognosis is worse -- often a screening/early-detection signal.",
             })
 
-    # -- 19. Vitals & Labs domain - abnormal readings --
     if "Vitals & Labs" in clinical_domains:
         spo2_col = cm.get("oxygen_saturation")
         if spo2_col and spo2_col in df.columns:
@@ -306,7 +413,8 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
                     "explanation": f"{low_spo2_pct:.1f}% of patients had an oxygen saturation reading below 92%, a threshold typically requiring clinical attention.",
                 })
 
-    # -- 20. Patient segmentation (KMeans) - previously computed, never surfaced --
+    # ==================== PATIENT SEGMENTATION ====================
+
     cluster_features = [c for c in [age_col, cost_col, los_col, sat_col] if c and c in df.columns]
     if len(cluster_features) >= 2:
         try:
@@ -317,7 +425,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
             cluster_sizes = clust["df"]["Cluster"].value_counts().sort_index()
             findings.append({
                 "id": "patient_segmentation", "severity": "info",
-                "kpi": {"label": "Patient Segments Found", "value": str(clust["best_k"]), "benchmark": "-"},
+                "kpi": {"label": "Patient Segments Found", "value": str(clust["best_k"]), "benchmark": "--"},
                 "chart": _chart("bar", [f"Cluster {i}" for i in cluster_sizes.index], cluster_sizes.values, y_label="Patients"),
                 "explanation": (
                     f"KMeans clustering on {', '.join(cluster_features)} found {clust['best_k']} distinct patient "
@@ -325,7 +433,124 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=20):
                 ),
             })
 
-    # Sort by severity: critical > warning > info > good
+    # ==================== STATISTICAL INFERENCE ====================
+
+    if SCIPY_OK:
+        num_candidates = [c for c in [cost_col, los_col, sat_col, age_col] if c and c in df.columns]
+
+        if "Readmission_Bin" in df.columns and len(num_candidates) >= 1:
+            corrs = {}
+            for c in num_candidates:
+                s = pd.to_numeric(df[c], errors="coerce")
+                if s.notna().sum() > 10:
+                    corrs[c] = df["Readmission_Bin"].corr(s)
+            if corrs:
+                top_feat = max(corrs, key=lambda k: abs(corrs[k]))
+                top_val = corrs[top_feat]
+                findings.append({
+                    "id": "readmission_correlation", "severity": "info",
+                    "kpi": {"label": "Strongest Readmission Correlate", "value": f"{top_feat} ({top_val:+.2f})", "benchmark": "--"},
+                    "chart": _chart("bar", list(corrs.keys()), list(corrs.values()), y_label="Correlation with Readmission"),
+                    "explanation": f"{top_feat} has the strongest linear relationship with readmission (r = {top_val:+.2f}). Values near +/-1 indicate a strong relationship; near 0, little to none.",
+                })
+
+        if "Readmission_Bin" in df.columns:
+            best_ttest = None
+            for c in num_candidates:
+                s = pd.to_numeric(df[c], errors="coerce")
+                g1 = s[df["Readmission_Bin"] == 1].dropna()
+                g0 = s[df["Readmission_Bin"] == 0].dropna()
+                if len(g1) > 5 and len(g0) > 5:
+                    t_stat, p_val = scipy_stats.ttest_ind(g1, g0, equal_var=False)
+                    if best_ttest is None or p_val < best_ttest[3]:
+                        best_ttest = (c, g1.mean(), g0.mean(), p_val)
+            if best_ttest:
+                var, mean1, mean0, p_val = best_ttest
+                significant = p_val < 0.05
+                findings.append({
+                    "id": "ttest_readmission", "severity": "warning" if significant else "info",
+                    "kpi": {"label": f"{var}: Readmitted vs Not", "value": f"p = {p_val:.4f}", "benchmark": "p < 0.05"},
+                    "chart": _chart("bar", ["Readmitted", "Not Readmitted"], [mean1, mean0], y_label=f"Avg {var}"),
+                    "explanation": (
+                        f"{'Statistically significant' if significant else 'No statistically significant'} difference in {var} "
+                        f"between readmitted (avg {mean1:.1f}) and non-readmitted (avg {mean0:.1f}) patients (p = {p_val:.4f})."
+                    ),
+                })
+
+        if cond_col and cond_col in df.columns:
+            best_anova = None
+            for c in num_candidates:
+                groups = [pd.to_numeric(g[c], errors="coerce").dropna().values
+                          for _, g in df.groupby(cond_col) if len(g[c].dropna()) > 2]
+                if len(groups) >= 2:
+                    try:
+                        f_stat, p_val = scipy_stats.f_oneway(*groups)
+                        if best_anova is None or p_val < best_anova[2]:
+                            best_anova = (c, f_stat, p_val)
+                    except Exception:
+                        continue
+            if best_anova:
+                var, f_stat, p_val = best_anova
+                significant = p_val < 0.05
+                findings.append({
+                    "id": "anova_by_condition", "severity": "info",
+                    "kpi": {"label": f"{var} Variance by Condition", "value": f"p = {p_val:.4f}", "benchmark": "p < 0.05"},
+                    "chart": None,
+                    "explanation": (
+                        f"{'Condition significantly affects' if significant else 'Condition does not significantly affect'} "
+                        f"{var} (ANOVA F = {f_stat:.2f}, p = {p_val:.4f})."
+                    ),
+                })
+
+    # ==================== ANALYTICS MATURITY & RECOMMENDATIONS ====================
+
+    findings.append({
+        "id": "analytics_maturity", "severity": "warning" if maturity["score"] < 70 else "good",
+        "kpi": {"label": "Analytics Maturity", "value": f"{maturity['score']}/100 (Grade {maturity['grade']})", "benchmark": ">=80"},
+        "chart": _chart(
+            "bar",
+            ["Data Quality", "Clinical", "Financial", "Satisfaction", "Readmission"],
+            [maturity["dq"], maturity["clinical"], maturity["financial"], maturity["satisfaction"], maturity["readmission"]],
+            y_label="Score /100",
+        ),
+        "explanation": f"Overall analytics maturity is {maturity['score']}/100 (Grade {maturity['grade']}), a composite of data quality, clinical outcomes, financial performance, satisfaction, and readmission control.",
+    })
+
+    maturity_dims = {
+        "Data Quality": maturity["dq"], "Clinical": maturity["clinical"],
+        "Financial": maturity["financial"], "Satisfaction": maturity["satisfaction"],
+        "Readmission": maturity["readmission"],
+    }
+    weakest_dim = min(maturity_dims, key=maturity_dims.get)
+    if maturity_dims[weakest_dim] < 80:
+        findings.append({
+            "id": "maturity_improvement_area", "severity": "warning",
+            "kpi": {"label": "Weakest Maturity Dimension", "value": f"{weakest_dim} ({maturity_dims[weakest_dim]:.0f})", "benchmark": ">=80"},
+            "chart": None,
+            "explanation": f"{weakest_dim} is the lowest-scoring maturity dimension at {maturity_dims[weakest_dim]:.0f}/100 -- the highest-leverage area to improve overall maturity.",
+        })
+
+    if age_col and age_col in df.columns:
+        elderly_pct = (df[age_col] >= 65).mean() * 100
+        if elderly_pct > 30:
+            findings.append({
+                "id": "rec_geriatric_care", "severity": "warning",
+                "kpi": {"label": "Geriatric Care Recommendation", "value": f"{elderly_pct:.0f}% aged 65+", "benchmark": "--"},
+                "chart": None,
+                "explanation": f"With {elderly_pct:.0f}% of the cohort aged 65+, establishing a dedicated geriatric assessment team and transitional care unit could reduce LOS and readmissions.",
+            })
+
+    if "Admission_DayOfWeek" in df.columns and "Admission_Hour" in df.columns:
+        dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+        dow = df["Admission_DayOfWeek"].value_counts().reindex(dow_order).fillna(0)
+        peak_hour = int(df["Admission_Hour"].value_counts().idxmax())
+        findings.append({
+            "id": "rec_staffing_alignment", "severity": "info",
+            "kpi": {"label": "Staffing Alignment", "value": f"{dow.idxmax()} @ {peak_hour}:00", "benchmark": "--"},
+            "chart": None,
+            "explanation": f"Peak admissions cluster around {dow.idxmax()} at {peak_hour}:00 -- review staffing rotas and consider staggering discharges ahead of this window.",
+        })
+
     order = {"critical": 0, "warning": 1, "info": 2, "good": 3}
     findings.sort(key=lambda f: order.get(f["severity"], 4))
 

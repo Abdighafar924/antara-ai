@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 import io
 import os
 import requests
+import pandas as pd
 
 from app import core, findings as findings_module, reports
 
@@ -78,7 +79,7 @@ async def analyze(file: UploadFile = File(...)):
 
 
 @app.post("/api/findings")
-async def get_findings(file: UploadFile = File(...), top_n: int = 20):
+async def get_findings(file: UploadFile = File(...), top_n: int = 40):
     """
     Returns the findings[] contract for the step-confirm frontend:
     ordered list of {id, severity, kpi, chart, explanation}.
@@ -133,6 +134,65 @@ async def report_pptx(file: UploadFile = File(...)):
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         headers={"Content-Disposition": "attachment; filename=medicore_ai_presentation.pptx"},
     )
+
+
+@app.post("/api/records")
+async def get_records(
+    file: UploadFile = File(...),
+    search: str = Form(""),
+    search_column: str = Form(""),
+    sort_by: str = Form(""),
+    sort_desc: bool = Form(True),
+    page: int = Form(1),
+    page_size: int = Form(50),
+):
+    """
+    Searchable/sortable/paginated view of the cleaned dataset -- backend equivalent
+    of the Streamlit app's Patient Records page. Internal engineered columns
+    (Age_Group, Cluster, CD4_Category, etc.) are excluded from the display set.
+    """
+    try:
+        content = await file.read()
+        raw_df, df, cm, val_errors_raw, cleaning_log, attrs, quality, hs, maturity = _process(content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    exclude_cols = {
+        "Age_Group", "Age_Risk", "BP_Category", "Cost_Per_Day", "High_Cost", "Long_Stay",
+        "Admission_Hour", "Admission_DayOfWeek", "Admission_Month", "Cluster", "Cluster_Label",
+        "CD4_Category", "Glycaemic_Control", "Cancer_Stage_Num", "Readmission_Bin",
+    }
+    display_cols = [c for c in df.columns if c not in exclude_cols]
+    view = df[display_cols].copy()
+
+    if search and search_column and search_column in view.columns:
+        view = view[view[search_column].astype(str).str.contains(search, case=False, na=False)]
+    elif search:
+        mask = pd.Series(False, index=view.index)
+        for c in view.select_dtypes(include="object").columns:
+            mask |= view[c].astype(str).str.contains(search, case=False, na=False)
+        view = view[mask]
+
+    if sort_by and sort_by in view.columns:
+        view = view.sort_values(sort_by, ascending=not sort_desc)
+
+    total = len(view)
+    page = max(1, page)
+    page_size = max(1, min(500, page_size))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_view = view.iloc[start:end]
+
+    records = page_view.astype(object).where(page_view.notna(), None).to_dict(orient="records")
+
+    return {
+        "columns": display_cols,
+        "records": records,
+        "total_records": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+    }
 
 
 def _truncate_for_orpheus(text: str, limit: int = ORPHEUS_CHAR_LIMIT) -> str:

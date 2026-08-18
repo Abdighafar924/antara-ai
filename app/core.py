@@ -331,6 +331,7 @@ def _engineer(df, cm):
     if age_col and age_col in df.columns:
         df["Age_Group"] = pd.cut(df[age_col], bins=[0,18,35,50,65,200],
                                   labels=["<18","18–35","35–50","50–65","65+"])
+        df["Age_Risk"] = pd.cut(df[age_col], bins=[0,45,60,200], labels=["Low","Medium","High"])
 
     if cost_col and los_col and cost_col in df.columns and los_col in df.columns:
         df["Cost_Per_Day"] = (df[cost_col] / df[los_col].replace(0, np.nan)).round(0)
