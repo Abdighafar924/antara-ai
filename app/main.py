@@ -183,6 +183,9 @@ async def get_records(
     end = start + page_size
     page_view = view.iloc[start:end]
 
+    float_cols = page_view.select_dtypes(include="float").columns
+    for c in float_cols:
+        page_view[c] = page_view[c].round(2)
     records = page_view.astype(object).where(page_view.notna(), None).to_dict(orient="records")
 
     return {
