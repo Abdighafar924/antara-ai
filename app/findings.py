@@ -40,6 +40,24 @@ def _top_by(df, group_col, value_col, n=6, ascending=False):
     return s if len(s) else None
 
 
+def _compare_all(series, formatter):
+    """
+    Turns a sorted (label -> value) series into one sentence that names
+    EVERY category, not just the single extreme -- so the walkthrough can
+    point at each bar in turn while explaining the full picture instead of
+    calling out one winner/loser and leaving the rest of the chart mute.
+    `formatter` turns a raw value into its display string, e.g. lambda v: f"{v:.1f}%".
+    """
+    if series is None or len(series) == 0:
+        return ""
+    parts = [f"{label} {formatter(val)}" for label, val in series.items()]
+    if len(parts) == 1:
+        return f"{parts[0]}."
+    spread = abs(series.iloc[0] - series.iloc[-1])
+    listed = ", ".join(parts[:-1]) + f", and {parts[-1]}"
+    return f"By category: {listed} -- a {formatter(spread)} spread from lowest to highest."
+
+
 def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
     findings = []
     cond_col = cm.get("condition")
@@ -69,7 +87,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "chart": chart,
             "explanation": (
                 f"Readmission rate is {rr:.1f}%, {'above' if rr > 15 else 'within'} the 15% benchmark. "
-                + (f"Highest-risk condition: {by_cond.index[0]} ({by_cond.iloc[0]:.1f}%)." if by_cond is not None else "")
+                + (_compare_all(by_cond, lambda v: f"{v:.1f}%") if by_cond is not None else "")
             ),
         })
 
@@ -84,7 +102,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "chart": chart,
             "explanation": (
                 f"Average treatment cost is KES {avg_cost:,.0f} vs a KES 9,000 benchmark. "
-                + (f"Highest-cost condition: {by_cond.index[0]} (KES {by_cond.iloc[0]:,.0f})." if by_cond is not None else "")
+                + (_compare_all(by_cond, lambda v: f"KES {v:,.0f}") if by_cond is not None else "")
             ),
         })
 
@@ -99,7 +117,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "chart": chart,
             "explanation": (
                 f"Patient satisfaction averages {sat:.2f}/5 against a 4.0 target. "
-                + (f"Lowest-scoring condition: {by_cond.index[0]} ({by_cond.iloc[0]:.2f}/5)." if by_cond is not None else "")
+                + (_compare_all(by_cond, lambda v: f"{v:.2f}/5") if by_cond is not None else "")
             ),
         })
 
@@ -134,7 +152,11 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "id": "admission_timing", "severity": "info",
             "kpi": {"label": "Peak Admission Day", "value": peak_day, "benchmark": "--"},
             "chart": _chart("bar", dow.index, dow.values, y_label="Admissions"),
-            "explanation": f"{peak_day} sees the highest admission volume ({peak_val:.0f} admissions). Consider staffing alignment.",
+            "explanation": (
+                f"{peak_day} sees the highest admission volume. "
+                + _compare_all(dow.sort_values(ascending=False), lambda v: f"{int(v):,} admissions")
+                + " Consider staffing alignment."
+            ),
         })
 
     if "Admission_Hour" in df.columns:
@@ -160,7 +182,8 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "kpi": {"label": "Patients 65+", "value": f"{elderly_pct:.1f}%", "benchmark": "--"},
             "chart": _chart("bar", ag_counts.index, ag_counts.values, y_label="Patients"),
             "explanation": (
-                f"{elderly_pct:.1f}% of the cohort is 65 or older."
+                f"{elderly_pct:.1f}% of the cohort is 65 or older. "
+                + _compare_all(ag_counts, lambda v: f"{int(v):,} patients")
                 + (" Consider dedicated geriatric assessment capacity." if elderly_pct > 30 else "")
             ),
         })
@@ -203,7 +226,10 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "id": "outcomes", "severity": "info",
             "kpi": {"label": "Most Common Outcome", "value": top_outcome, "benchmark": "--"},
             "chart": _chart("bar", odist.index[:6], odist.values[:6], y_label="Patients"),
-            "explanation": f"{top_pct:.1f}% of patients had outcome '{top_outcome}'.",
+            "explanation": (
+                f"{top_pct:.1f}% of patients had outcome '{top_outcome}'. "
+                + _compare_all(odist.head(6), lambda v: f"{int(v):,} patients")
+            ),
         })
 
     if outcome_col and outcome_col in df.columns and cond_col and cond_col in df.columns:
@@ -219,7 +245,10 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
                     "id": "recovery_rate_by_condition", "severity": "warning" if recovery_by_cond.iloc[0] < 70 else "info",
                     "kpi": {"label": "Lowest Recovery Rate", "value": f"{worst_cond} ({recovery_by_cond.iloc[0]:.1f}%)", "benchmark": "--"},
                     "chart": _chart("bar", recovery_by_cond.index[:6], recovery_by_cond.values[:6], y_label="Recovery Rate (%)"),
-                    "explanation": f"{worst_cond} has the lowest recovery rate among recorded conditions at {recovery_by_cond.iloc[0]:.1f}%.",
+                    "explanation": (
+                        f"{worst_cond} has the lowest recovery rate among recorded conditions. "
+                        + _compare_all(recovery_by_cond.head(6), lambda v: f"{v:.1f}%")
+                    ),
                 })
 
     if "Readmission_Bin" in df.columns and "Age_Group" in df.columns:
@@ -230,7 +259,10 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
                 "id": "readmission_by_age_group", "severity": "warning" if ra.max() > 20 else "info",
                 "kpi": {"label": "Highest-Readmission Age Group", "value": f"{worst_age} ({ra.max():.1f}%)", "benchmark": "<=15%"},
                 "chart": _chart("bar", ra.index, ra.values, y_label="Readmission Rate (%)"),
-                "explanation": f"The {worst_age} age group has the highest readmission rate at {ra.max():.1f}%.",
+                "explanation": (
+                    f"The {worst_age} age group has the highest readmission rate. "
+                    + _compare_all(ra.sort_values(ascending=False), lambda v: f"{v:.1f}%")
+                ),
             })
 
     # ==================== FINANCIAL ====================
@@ -242,7 +274,10 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
                 "id": "cost_by_insurance", "severity": "info",
                 "kpi": {"label": "Highest-Cost Payer", "value": by_ins.index[0], "benchmark": "--"},
                 "chart": _chart("bar", by_ins.index, by_ins.values, y_label="Avg Cost (KES)"),
-                "explanation": f"{by_ins.index[0]} patients have the highest average cost at KES {by_ins.iloc[0]:,.0f}.",
+                "explanation": (
+                    f"{by_ins.index[0]} patients have the highest average cost. "
+                    + _compare_all(by_ins, lambda v: f"KES {v:,.0f}")
+                ),
             })
 
     if proc_col and proc_col in df.columns and cost_col and cost_col in df.columns:
@@ -252,7 +287,10 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
                 "id": "cost_by_procedure", "severity": "info",
                 "kpi": {"label": "Highest-Cost Procedure", "value": by_proc.index[0], "benchmark": "--"},
                 "chart": _chart("bar", by_proc.index, by_proc.values, y_label="Avg Cost (KES)"),
-                "explanation": f"{by_proc.index[0]} averages KES {by_proc.iloc[0]:,.0f} per patient, the highest of any procedure recorded.",
+                "explanation": (
+                    f"{by_proc.index[0]} is the highest-cost procedure per patient. "
+                    + _compare_all(by_proc, lambda v: f"KES {v:,.0f}")
+                ),
             })
 
     if proc_col and proc_col in df.columns:
@@ -262,7 +300,10 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
                 "id": "procedure_volume", "severity": "info",
                 "kpi": {"label": "Most Common Procedure", "value": proc_counts.index[0], "benchmark": "--"},
                 "chart": _chart("bar", proc_counts.index, proc_counts.values, y_label="Patients"),
-                "explanation": f"{proc_counts.index[0]} is the most frequently performed procedure ({proc_counts.iloc[0]:,} patients).",
+                "explanation": (
+                    f"{proc_counts.index[0]} is the most frequently performed procedure. "
+                    + _compare_all(proc_counts, lambda v: f"{int(v):,} patients")
+                ),
             })
 
     if "High_Cost" in df.columns and cost_col and cost_col in df.columns:
@@ -291,7 +332,10 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
                 "id": "ward_volume", "severity": "info",
                 "kpi": {"label": "Busiest Ward", "value": by_ward.index[0], "benchmark": "--"},
                 "chart": _chart("bar", by_ward.index, by_ward.values, y_label="Patients"),
-                "explanation": f"{by_ward.index[0]} handles the highest patient volume ({by_ward.iloc[0]:,} patients).",
+                "explanation": (
+                    f"{by_ward.index[0]} handles the highest patient volume. "
+                    + _compare_all(by_ward, lambda v: f"{int(v):,} patients")
+                ),
             })
 
     # ==================== DATA QUALITY ====================
