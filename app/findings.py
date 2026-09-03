@@ -42,19 +42,27 @@ def _top_by(df, group_col, value_col, n=6, ascending=False):
 
 def _compare_all(series, formatter):
     """
-    Turns a sorted (label -> value) series into one sentence that names
-    EVERY category, not just the single extreme -- so the walkthrough can
-    point at each bar in turn while explaining the full picture instead of
-    calling out one winner/loser and leaving the rest of the chart mute.
-    `formatter` turns a raw value into its display string, e.g. lambda v: f"{v:.1f}%".
+    Turns a sorted (label -> value) series into a comparison sentence.
+    Four or fewer categories: names all of them. More than four: shows the
+    first two and last two (the extremes on both ends of the sort) with a
+    "then N more" bridge, so the walkthrough still points at real bars
+    without reading out a long list. `formatter` turns a raw value into its
+    display string, e.g. lambda v: f"{v:.1f}%".
     """
     if series is None or len(series) == 0:
         return ""
-    parts = [f"{label} {formatter(val)}" for label, val in series.items()]
-    if len(parts) == 1:
-        return f"{parts[0]}."
+    n = len(series)
+    if n <= 4:
+        parts = [f"{label} {formatter(val)}" for label, val in series.items()]
+        listed = parts[0] if n == 1 else ", ".join(parts[:-1]) + f", and {parts[-1]}"
+    else:
+        top = [f"{label} {formatter(val)}" for label, val in series.iloc[:2].items()]
+        bottom = [f"{label} {formatter(val)}" for label, val in series.iloc[-2:].items()]
+        skipped = n - 4
+        listed = f"{top[0]} and {top[1]} lead, then {skipped} more, down to {bottom[0]} and {bottom[1]}"
+    if n == 1:
+        return f"{listed}."
     spread = abs(series.iloc[0] - series.iloc[-1])
-    listed = ", ".join(parts[:-1]) + f", and {parts[-1]}"
     return f"By category: {listed} -- a {formatter(spread)} spread from lowest to highest."
 
 
