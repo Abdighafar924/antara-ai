@@ -614,6 +614,54 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "explanation": explanation,
         })
 
+    CATEGORY_MAP = {
+        "readmission": "Overview", "cost": "Overview", "satisfaction": "Overview",
+        "length_of_stay": "Overview", "long_stay_share": "Overview",
+        "demographics_age": "Demographics & Timing", "gender_cost_gap": "Demographics & Timing",
+        "condition_gender_prevalence": "Demographics & Timing", "admission_timing": "Demographics & Timing",
+        "admission_hour_peak": "Demographics & Timing",
+        "outcomes": "Clinical Outcomes", "recovery_rate_by_condition": "Clinical Outcomes",
+        "readmission_by_age_group": "Clinical Outcomes",
+        "cost_by_insurance": "Financial", "cost_by_procedure": "Financial", "procedure_volume": "Financial",
+        "high_cost_patients": "Financial", "cost_per_day": "Financial", "ward_volume": "Financial",
+        "data_quality": "Data Quality",
+        "diabetes_control": "Clinical Domains", "blood_glucose_avg": "Clinical Domains",
+        "hiv_severity": "Clinical Domains", "viral_load_suppression": "Clinical Domains",
+        "art_status_cd4": "Clinical Domains", "hypertension_severity": "Clinical Domains",
+        "tb_drug_resistance": "Clinical Domains", "cancer_stage": "Clinical Domains",
+        "low_oxygen_saturation": "Clinical Domains",
+        "patient_segmentation": "Statistics", "readmission_correlation": "Statistics",
+        "ttest_readmission": "Statistics", "anova_by_condition": "Statistics",
+        "analytics_maturity": "Maturity & Recommendations", "maturity_improvement_area": "Maturity & Recommendations",
+        "rec_geriatric_care": "Maturity & Recommendations", "rec_staffing_alignment": "Maturity & Recommendations",
+    }
+    for f in findings:
+        f["category"] = CATEGORY_MAP.get(f["id"], "Overview")
+
+    CATEGORY_MAP = {
+        "readmission": "Overview", "cost": "Overview", "satisfaction": "Overview",
+        "length_of_stay": "Overview", "long_stay_share": "Overview",
+        "demographics_age": "Demographics & Timing", "gender_cost_gap": "Demographics & Timing",
+        "condition_gender_prevalence": "Demographics & Timing", "admission_timing": "Demographics & Timing",
+        "admission_hour_peak": "Demographics & Timing",
+        "outcomes": "Clinical Outcomes", "recovery_rate_by_condition": "Clinical Outcomes",
+        "readmission_by_age_group": "Clinical Outcomes",
+        "cost_by_insurance": "Financial", "cost_by_procedure": "Financial", "procedure_volume": "Financial",
+        "high_cost_patients": "Financial", "cost_per_day": "Financial", "ward_volume": "Financial",
+        "data_quality": "Data Quality",
+        "diabetes_control": "Clinical Domains", "blood_glucose_avg": "Clinical Domains",
+        "hiv_severity": "Clinical Domains", "viral_load_suppression": "Clinical Domains",
+        "art_status_cd4": "Clinical Domains", "hypertension_severity": "Clinical Domains",
+        "tb_drug_resistance": "Clinical Domains", "cancer_stage": "Clinical Domains",
+        "low_oxygen_saturation": "Clinical Domains",
+        "patient_segmentation": "Statistics", "readmission_correlation": "Statistics",
+        "ttest_readmission": "Statistics", "anova_by_condition": "Statistics",
+        "analytics_maturity": "Maturity & Recommendations", "maturity_improvement_area": "Maturity & Recommendations",
+        "rec_geriatric_care": "Maturity & Recommendations", "rec_staffing_alignment": "Maturity & Recommendations",
+    }
+    for f in findings:
+        f["category"] = CATEGORY_MAP.get(f["id"], "Overview")
+
     order = {"critical": 0, "warning": 1, "info": 2, "good": 3}
     findings.sort(key=lambda f: order.get(f["severity"], 4))
 
