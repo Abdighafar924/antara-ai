@@ -614,29 +614,53 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "explanation": explanation,
         })
 
-    CATEGORY_MAP = {
-        "readmission": "Overview", "cost": "Overview", "satisfaction": "Overview",
-        "length_of_stay": "Overview", "long_stay_share": "Overview",
-        "demographics_age": "Demographics & Timing", "gender_cost_gap": "Demographics & Timing",
-        "condition_gender_prevalence": "Demographics & Timing", "admission_timing": "Demographics & Timing",
-        "admission_hour_peak": "Demographics & Timing",
-        "outcomes": "Clinical Outcomes", "recovery_rate_by_condition": "Clinical Outcomes",
-        "readmission_by_age_group": "Clinical Outcomes",
-        "cost_by_insurance": "Financial", "cost_by_procedure": "Financial", "procedure_volume": "Financial",
-        "high_cost_patients": "Financial", "cost_per_day": "Financial", "ward_volume": "Financial",
-        "data_quality": "Data Quality",
-        "diabetes_control": "Clinical Domains", "blood_glucose_avg": "Clinical Domains",
-        "hiv_severity": "Clinical Domains", "viral_load_suppression": "Clinical Domains",
-        "art_status_cd4": "Clinical Domains", "hypertension_severity": "Clinical Domains",
-        "tb_drug_resistance": "Clinical Domains", "cancer_stage": "Clinical Domains",
-        "low_oxygen_saturation": "Clinical Domains",
-        "patient_segmentation": "Statistics", "readmission_correlation": "Statistics",
-        "ttest_readmission": "Statistics", "anova_by_condition": "Statistics",
-        "analytics_maturity": "Maturity & Recommendations", "maturity_improvement_area": "Maturity & Recommendations",
-        "rec_geriatric_care": "Maturity & Recommendations", "rec_staffing_alignment": "Maturity & Recommendations",
-    }
-    for f in findings:
-        f["category"] = CATEGORY_MAP.get(f["id"], "Overview")
+    shap_importance = core.compute_shap_feature_importance(df, cm)
+    if shap_importance is not None and len(shap_importance):
+        top = shap_importance.iloc[0]
+        direction = "raises" if top["mean_signed_shap"] > 0 else "lowers"
+        chart = _chart(
+            "bar", shap_importance["label"].tolist(), [round(v, 4) for v in shap_importance["mean_abs_shap"]],
+            y_label="Impact on Readmission Risk (mean |SHAP|)",
+        )
+        driver_series = shap_importance.set_index("label")["mean_abs_shap"]
+        explanation = (
+            f"The strongest single driver of readmission risk this model finds is "
+            f"{top[''label'']}, which on average {direction} the predicted risk. "
+            + _compare_all(driver_series, lambda v: f"{v:.3f} impact")
+            + " This is an exploratory model trained fresh on this dataset for narrative "
+              "purposes -- not a validated or clinically-approved risk score."
+        )
+        findings.append({
+            "id": "shap_readmission_drivers", "severity": "info",
+            "kpi": {"label": "Top Readmission Driver", "value": top["label"], "benchmark": "--"},
+            "chart": chart,
+            "explanation": explanation,
+        })
+
+    anomaly_info = core.compute_anomalies(df, cm)
+    if anomaly_info:
+        labels = [f.replace("_", " ").title() for f in anomaly_info["feature_cols"]]
+        deltas = {
+            label: round(anomaly_info["means_anomaly"][f] - anomaly_info["means_normal"][f], 2)
+            for label, f in zip(labels, anomaly_info["feature_cols"])
+        }
+        chart = _chart("bar", list(deltas.keys()), list(deltas.values()),
+                        y_label="Anomalous vs Typical Patient (difference)")
+        severity = "warning" if anomaly_info["pct"] > 8 else "info"
+        explanation = (
+            f"{anomaly_info[''n_anomalies'']} patients ({anomaly_info[''pct'']}% of the cohort) show an unusual "
+            f"combination of {'', ''.join(labels).lower()} relative to the rest of the population -- not "
+            f"necessarily extreme on any single metric alone, but statistically atypical together. "
+            + _compare_all(pd.Series(deltas), lambda v: f"{v:+.2f} vs typical patient")
+            + " These records may be worth a manual chart review -- data entry errors and genuinely "
+              "unusual cases both tend to surface here."
+        )
+        findings.append({
+            "id": "cohort_anomalies", "severity": severity,
+            "kpi": {"label": "Anomalous Patients", "value": f"{anomaly_info[''pct'']}%", "benchmark": "--"},
+            "chart": chart,
+            "explanation": explanation,
+        })
 
     CATEGORY_MAP = {
         "readmission": "Overview", "cost": "Overview", "satisfaction": "Overview",
@@ -656,6 +680,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
         "low_oxygen_saturation": "Clinical Domains",
         "patient_segmentation": "Statistics", "readmission_correlation": "Statistics",
         "ttest_readmission": "Statistics", "anova_by_condition": "Statistics",
+        "shap_readmission_drivers": "Predictive Insights", "cohort_anomalies": "Predictive Insights",
         "analytics_maturity": "Maturity & Recommendations", "maturity_improvement_area": "Maturity & Recommendations",
         "rec_geriatric_care": "Maturity & Recommendations", "rec_staffing_alignment": "Maturity & Recommendations",
     }

@@ -511,3 +511,148 @@ def run_clustering(df, feature_cols, max_k=8):
     df_out["Cluster"] = labels
     return dict(df=df_out, best_k=best_k, sil=round(silhouette_score(X, labels), 3),
                 inertias=inertias, silhouettes=silhouettes, k_range=list(range(2, max_k+1)))
+
+
+def _humanize_feature(name):
+    """Turns a one-hot column like 'condition_Diabetes' into 'Diabetes',
+    or a plain field like 'length_of_stay' into 'Length Of Stay'."""
+    for prefix in ("gender", "condition", "ward", "insurance"):
+        if name.startswith(prefix + "_"):
+            return name[len(prefix) + 1:]
+    return name.replace("_", " ").title()
+
+
+def compute_shap_feature_importance(df, cm, max_features=8):
+    """
+    Trains a lightweight RandomForest to predict Readmission_Bin from whatever
+    numeric/categorical fields are available, then uses SHAP to rank which
+    features actually move the prediction and in which direction.
+
+    This is an exploratory model fit fresh to whatever CSV is uploaded --
+    not a validated, persisted, or clinically-approved risk score. No
+    train/test split is reported since typical uploads are too small for
+    that to be a stable number; this exists purely to surface which factors
+    the data itself associates with readmission, for narrative purposes.
+
+    Returns None (silently) if there's no readmission target, too little
+    data, only one class present, or scikit-learn/shap aren''t installed --
+    same fail-open pattern as the rest of this engine.
+    """
+    if "Readmission_Bin" not in df.columns:
+        return None
+    y = df["Readmission_Bin"]
+    if len(df) < 60 or y.nunique() < 2:
+        return None
+
+    try:
+        from sklearn.ensemble import RandomForestClassifier
+        import shap
+    except ImportError:
+        return None
+
+    X_parts = {}
+
+    for field in ("age", "cost", "length_of_stay", "satisfaction"):
+        col = cm.get(field)
+        if col and col in df.columns:
+            X_parts[field] = pd.to_numeric(df[col], errors="coerce")
+
+    for field in ("gender", "condition", "ward", "insurance"):
+        col = cm.get(field)
+        if col and col in df.columns and df[col].nunique() <= 20:
+            dummies = pd.get_dummies(df[col].astype(str), prefix=field)
+            for dcol in dummies.columns:
+                X_parts[dcol] = dummies[dcol]
+
+    if len(X_parts) < 2:
+        return None
+
+    X = pd.DataFrame(X_parts).fillna(0)
+    mask = X.notna().all(axis=1) & y.notna()
+    X = X[mask]
+    y_clean = y[mask]
+    if len(X) < 60 or y_clean.nunique() < 2:
+        return None
+
+    model = RandomForestClassifier(
+        n_estimators=200, max_depth=6, random_state=42, class_weight="balanced"
+    )
+    model.fit(X, y_clean)
+
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)
+    # Different shap/sklearn version combos return this differently for binary
+    # classifiers: a list of per-class arrays, or a single 3D array shaped
+    # (samples, features, classes). Handle both, always taking class 1 (readmitted).
+    if isinstance(shap_values, list):
+        sv = shap_values[1]
+    elif shap_values.ndim == 3:
+        sv = shap_values[:, :, 1]
+    else:
+        sv = shap_values
+
+    mean_abs = np.abs(sv).mean(axis=0)
+    mean_signed = sv.mean(axis=0)
+
+    importance = pd.DataFrame({
+        "feature": X.columns,
+        "label": [_humanize_feature(c) for c in X.columns],
+        "mean_abs_shap": mean_abs,
+        "mean_signed_shap": mean_signed,
+    }).sort_values("mean_abs_shap", ascending=False).head(max_features)
+
+    return importance if len(importance) else None
+
+
+def compute_anomalies(df, cm, contamination=0.05):
+    """
+    Flags patients whose COMBINATION of cost / length_of_stay / satisfaction /
+    age is statistically unusual relative to the rest of the cohort
+    (IsolationForest) -- distinct from clustering (which groups similar
+    patients) and from simple outlier flags on any single column. A patient
+    can look completely normal on every metric individually and still be
+    flagged here if the *combination* is atypical (e.g. very short stay but
+    very high cost).
+
+    Returns None if fewer than 2 numeric fields are available, too little
+    data, or scikit-learn isn''t installed -- same fail-open pattern as the
+    rest of this engine.
+    """
+    try:
+        from sklearn.ensemble import IsolationForest
+    except ImportError:
+        return None
+
+    feature_cols = []
+    X_parts = {}
+    for field in ("cost", "length_of_stay", "satisfaction", "age"):
+        col = cm.get(field)
+        if col and col in df.columns:
+            X_parts[field] = pd.to_numeric(df[col], errors="coerce")
+            feature_cols.append(field)
+
+    if len(feature_cols) < 2:
+        return None
+
+    X = pd.DataFrame(X_parts).dropna()
+    if len(X) < 30:
+        return None
+
+    model = IsolationForest(contamination=contamination, random_state=42, n_estimators=200)
+    preds = model.fit_predict(X)  # -1 = anomaly, 1 = normal
+
+    is_anomaly = preds == -1
+    n_anomalies = int(is_anomaly.sum())
+    if n_anomalies == 0:
+        return None
+
+    means_anomaly = X[is_anomaly].mean()
+    means_normal = X[~is_anomaly].mean()
+
+    return dict(
+        n_anomalies=n_anomalies,
+        pct=round(n_anomalies / len(X) * 100, 1),
+        feature_cols=feature_cols,
+        means_anomaly=means_anomaly,
+        means_normal=means_normal,
+    )
