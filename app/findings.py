@@ -625,7 +625,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
         driver_series = shap_importance.set_index("label")["mean_abs_shap"]
         explanation = (
             f"The strongest single driver of readmission risk this model finds is "
-            f"{top[''label'']}, which on average {direction} the predicted risk. "
+            f"{top['label']}, which on average {direction} the predicted risk. "
             + _compare_all(driver_series, lambda v: f"{v:.3f} impact")
             + " This is an exploratory model trained fresh on this dataset for narrative "
               "purposes -- not a validated or clinically-approved risk score."
@@ -648,8 +648,8 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
                         y_label="Anomalous vs Typical Patient (difference)")
         severity = "warning" if anomaly_info["pct"] > 8 else "info"
         explanation = (
-            f"{anomaly_info[''n_anomalies'']} patients ({anomaly_info[''pct'']}% of the cohort) show an unusual "
-            f"combination of {'', ''.join(labels).lower()} relative to the rest of the population -- not "
+            f"{anomaly_info['n_anomalies']} patients ({anomaly_info['pct']}% of the cohort) show an unusual "
+            f"combination of {', '.join(labels).lower()} relative to the rest of the population -- not "
             f"necessarily extreme on any single metric alone, but statistically atypical together. "
             + _compare_all(pd.Series(deltas), lambda v: f"{v:+.2f} vs typical patient")
             + " These records may be worth a manual chart review -- data entry errors and genuinely "
@@ -657,7 +657,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
         )
         findings.append({
             "id": "cohort_anomalies", "severity": severity,
-            "kpi": {"label": "Anomalous Patients", "value": f"{anomaly_info[''pct'']}%", "benchmark": "--"},
+            "kpi": {"label": "Anomalous Patients", "value": f"{anomaly_info['pct']}%", "benchmark": "--"},
             "chart": chart,
             "explanation": explanation,
         })
