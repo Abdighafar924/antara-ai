@@ -592,13 +592,28 @@ def compute_shap_feature_importance(df, cm, max_features=8):
         sv = shap_values
 
     mean_abs = np.abs(sv).mean(axis=0)
-    mean_signed = sv.mean(axis=0)
+
+    # Direction: correlate each feature's own raw value against its own SHAP
+    # contribution, rather than averaging the signed SHAP value across
+    # everyone. A plain average can get dominated by whichever group is the
+    # majority (e.g. mostly-younger patients pulling age's average SHAP
+    # negative) even when higher values of that feature genuinely raise risk
+    # for the people who have them -- correlation captures that relationship
+    # correctly, the same way a SHAP dependence plot would show it visually.
+    direction = []
+    for i in range(X.shape[1]):
+        col_vals = X.iloc[:, i].values.astype(float)
+        shap_col = sv[:, i]
+        if np.std(col_vals) == 0 or np.std(shap_col) == 0:
+            direction.append(0.0)
+        else:
+            direction.append(np.corrcoef(col_vals, shap_col)[0, 1])
 
     importance = pd.DataFrame({
         "feature": X.columns,
         "label": [_humanize_feature(c) for c in X.columns],
         "mean_abs_shap": mean_abs,
-        "mean_signed_shap": mean_signed,
+        "direction_corr": direction,
     }).sort_values("mean_abs_shap", ascending=False).head(max_features)
 
     return importance if len(importance) else None

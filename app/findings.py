@@ -617,7 +617,7 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
     shap_importance = core.compute_shap_feature_importance(df, cm)
     if shap_importance is not None and len(shap_importance):
         top = shap_importance.iloc[0]
-        direction = "raises" if top["mean_signed_shap"] > 0 else "lowers"
+        direction = "raises" if top["direction_corr"] > 0 else "lowers"
         chart = _chart(
             "bar", shap_importance["label"].tolist(), [round(v, 4) for v in shap_importance["mean_abs_shap"]],
             y_label="Impact on Readmission Risk (mean |SHAP|)",
@@ -636,6 +636,34 @@ def build_findings(df, cm, hs, quality, maturity, clinical_domains, top_n=40):
             "chart": chart,
             "explanation": explanation,
         })
+
+        rank_lookup = {row["feature"]: i for i, row in
+                       enumerate((r for _, r in shap_importance.iterrows()), start=1)}
+        FEATURE_BY_FINDING_ID = {
+            "cost": "cost", "satisfaction": "satisfaction", "length_of_stay": "length_of_stay",
+            "demographics_age": "age", "readmission_by_age_group": "age",
+        }
+        for f in findings:
+            if f["id"] == "readmission":
+                driver = shap_importance.iloc[0]
+                d_word = "raises" if driver["direction_corr"] > 0 else "lowers"
+                f["explanation"] += (
+                    f" A predictive model trained on this data ranks {driver['label']} as the "
+                    f"top driver of readmission risk, which it typically {d_word}."
+                )
+                continue
+            feature_key = FEATURE_BY_FINDING_ID.get(f["id"])
+            if not feature_key:
+                continue
+            match = shap_importance[shap_importance["feature"] == feature_key]
+            if match.empty:
+                continue
+            row = match.iloc[0]
+            d_word = "raises" if row["direction_corr"] > 0 else "lowers"
+            f["explanation"] += (
+                f" A predictive model ranks this the #{rank_lookup[feature_key]} driver of "
+                f"readmission risk in this cohort, and it typically {d_word} that risk."
+            )
 
     anomaly_info = core.compute_anomalies(df, cm)
     if anomaly_info:
